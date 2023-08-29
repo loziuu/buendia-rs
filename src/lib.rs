@@ -1,3 +1,6 @@
 pub mod indexer;
-mod index;
+pub mod searcher;
+pub mod index;
+
+mod tokenizer;
 mod splitter;

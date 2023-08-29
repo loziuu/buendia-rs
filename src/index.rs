@@ -1,12 +1,18 @@
+use serde::{Deserialize, Serialize};
+
 use super::splitter;
 
-// Trie with prefixes 
+const ROOT_VALUE: &str = "\0";
+
+// Trie with prefixes
 // Single-threaded so far.
 // TODO: Does it need to be sorted eventually?
+#[derive(Serialize, Deserialize)]
 pub struct Index {
     root: Node,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Node {
     term: String,
     children: Vec<Node>,
@@ -33,13 +39,16 @@ impl Node {
         }
     }
 
-    pub fn flatten(&self) -> Vec<Term> { 
+    pub fn flatten(&self) -> Vec<Term> {
         let mut terms = Vec::new();
         let mut stack = Vec::new();
         stack.push(self);
         while let Some(node) = stack.pop() {
             if node.is_word {
-                terms.push(Term{ term: node.term.clone(), positions: node.positions.clone()} );
+                terms.push(Term {
+                    term: node.term.clone(),
+                    positions: node.positions.clone(),
+                });
             }
             stack.extend(node.children.iter());
         }
@@ -47,16 +56,16 @@ impl Node {
     }
 }
 
-struct Term {
-    term: String,
-    positions: Vec<usize>,
+pub struct Term {
+    pub term: String,
+    pub positions: Vec<usize>,
 }
 
 impl Index {
     pub fn new() -> Index {
         Index {
             root: Node {
-                term: "\0".to_string(),
+                term: ROOT_VALUE.to_owned(),
                 children: vec![],
                 positions: vec![],
                 is_word: false,
@@ -65,23 +74,28 @@ impl Index {
     }
 
     pub fn insert(&mut self, term: String, position: usize) {
+        println!("Inserting: {}", term);
         insert_into_tree(&mut self.root, &term, position);
     }
 
     pub fn find_term(&self, term: &str) -> Option<Term> {
-        traverse_tree(&self.root, term).map(|n| Term {
+        find(&self.root, term).map(|n| Term {
             term: n.term.clone(),
             positions: n.positions.clone(),
         })
     }
 
-    fn search(&self, arg: &str) -> Vec<Term> {
+    pub fn search(&self, arg: &str) -> Vec<Term> {
         if let Some(node) = traverse_tree(&self.root, arg) {
             println!("Found term: {}", node.term);
             node.flatten()
         } else {
             Vec::with_capacity(0)
         }
+    }
+
+    pub fn flat_terms(&self) -> Vec<Term> {
+        self.root.flatten()
     }
 }
 
@@ -90,35 +104,55 @@ fn insert_into_tree(node: &mut Node, term: &str, position: usize) {
     let children = &mut node.children;
     for i in 0..children.len() {
         let n = &mut children[i];
-        let prefix = splitter::prefix_split_only_position(&n.term, term);
-        if prefix == n.term.len() {
+        if n.term == term {
+            n.is_word = true;
             return n.positions.push(position);
         }
+        let prefix = splitter::prefix_split_only_position(&n.term, term);
+        if prefix == n.term.len() {
+            return insert_into_tree(n, &term[prefix..], position);
+        }
         if prefix > 0 {
-            let mut prefix_node = Node::new(&n.term[..prefix]);
-            let mut removed = children.remove(i);
-            removed.term = removed.term[prefix..].to_string();
+            if prefix == term.len() {
+                let mut prefix_node = Node::new_word(&term, position);
+                let mut removed = children.remove(i);
+                removed.term = removed.term[prefix..].to_string();
+                prefix_node.children.push(removed);
+                children.insert(i, prefix_node);
+                return;
+            } else {
+                println!("Splitting node: {} at: {}", n.term, prefix);
+                let mut prefix_node = Node::new(&n.term[..prefix]);
+                let mut removed = children.remove(i);
+                removed.term = removed.term[prefix..].to_string();
 
-            insert_into_tree(&mut removed, &term[prefix..], position);
+                insert_into_tree(&mut prefix_node, &term[prefix..], position);
 
-            prefix_node.children.push(removed);
-            children.insert(i, prefix_node);
-            return;
+                prefix_node.children.push(removed);
+                children.insert(i, prefix_node);
+                return;
+            }
         }
     }
     return children.push(Node::new_word(term, position));
 }
 
 fn traverse_tree<'a>(node: &'a Node, term: &str) -> Option<&'a Node> {
+    println!("Traversing node: {} for term: {}", node.term, term);
     if node.term == term {
         Some(node)
     } else {
-        if node.children.is_empty() {
+        let last = splitter::prefix_split_only_position(term, &node.term);
+        if last == 0 && node.term != ROOT_VALUE {
             return None;
         }
-        let last = splitter::prefix_split_only_position(term, &node.term);
+        if last == term.len() {
+            println!("Found term: {}", node.term);
+            return Some(node);
+        }
         for i in 0..node.children.len() {
             let slice = &term[last..];
+
             if let Some(n) = traverse_tree(&node.children[i], &slice) {
                 return Some(n);
             }
@@ -127,27 +161,26 @@ fn traverse_tree<'a>(node: &'a Node, term: &str) -> Option<&'a Node> {
     }
 }
 
-fn closest_term<'a>(node: &'a Node, arg: &str) -> Option<&'a Node> {
-    let prefix = splitter::prefix_split_only_position(arg, &node.term);
-    if prefix == node.term.len() || prefix == arg.len() {
+fn find<'a>(node: &'a Node, term: &str) -> Option<&'a Node> {
+    if node.term == term {
         Some(node)
-    } else if !node.children.is_empty() {
+    } else {
+        let last = splitter::prefix_split_only_position(term, &node.term);
+        if last == 0 && node.term != ROOT_VALUE {
+            return None;
+        }
         for i in 0..node.children.len() {
-            let slice = &arg[prefix..];
-            if let Some(n) = traverse_tree(&node.children[i], &slice) {
+            let slice = &term[last..];
+            if let Some(n) = find(&node.children[i], &slice) {
                 return Some(n);
             }
         }
-        None
-    } else {
         None
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::index::Node;
-
     use super::Index;
 
     #[test]
@@ -221,5 +254,34 @@ mod tests {
         let result = tree.search("e");
 
         assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn test_aragorn() {
+        let mut tree = Index::new();
+        tree.insert(String::from("aragorn"), 1);
+        tree.insert(String::from("aragorn"), 2);
+        tree.insert(String::from("arathorn"), 3);
+        tree.insert(String::from("aragorn"), 4);
+
+        let result = tree.find_term("aragorn");
+        assert_eq!(result.unwrap().positions.len(), 3);
+    }
+
+    #[test]
+    fn insert_to_with_same_prefixes_and_traverse() {
+        let mut tree = Index::new();
+        tree.insert(String::from("example"), 10);
+        tree.insert(String::from("exactly"), 10);
+        tree.insert(String::from("experience"), 10);
+        tree.insert(String::from("electric"), 10);
+        tree.insert(String::from("efficiency"), 10);
+
+        assert_eq!(tree.search("e").len(), 5);
+        assert_eq!(tree.search("ex").len(), 3);
+        assert_eq!(tree.search("exa").len(), 2);
+        assert_eq!(tree.search("exac").len(), 1);
+        assert_eq!(tree.search("exactly").len(), 1);
+        assert_eq!(tree.search("efficiency").len(), 1);
     }
 }
